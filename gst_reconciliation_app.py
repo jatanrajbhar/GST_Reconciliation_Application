@@ -1825,7 +1825,7 @@ class GSTReconciliationApp(ctk.CTk):
 
         footer_label = ctk.CTkLabel(
             footer_frame,
-            text="Copyright (c) GSC in time 2026 | Contact: info@gscintime.com | https://www.gscintime.com | +91-22-4612 5600",
+            text="Copyright (c) Jatan Rajbhar 2026 | Contact: jatanrajbhar34@gmail.com| https://github.com/jatanrajbhar",
             font=ctk.CTkFont(size=11),
             text_color="white"
         )
@@ -2782,3 +2782,4 @@ class GSTReconciliationApp(ctk.CTk):
 if __name__ == "__main__":
     app = GSTReconciliationApp()
     app.mainloop()
+
