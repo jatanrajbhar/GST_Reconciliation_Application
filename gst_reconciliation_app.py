@@ -909,6 +909,7 @@ def create_itc_result(itc_df, itc_register, gstr_2a, comparison_df=None, merged_
                 if bm:
                     booking_month_2a_lookup[key] = bm
     vals_2a_lookup = {}  # key → {'CGST', 'SGST', 'IGST', 'TYPE'}
+    matched_2a_keys = set()  # normalized 2A keys that were matched by some ITC entry
 
     if comparison_df is not None and not comparison_df.empty:
         # Only use MATCH statuses from comparison_df
@@ -932,6 +933,7 @@ def create_itc_result(itc_df, itc_register, gstr_2a, comparison_df=None, merged_
                 if key in gstr_lookup:
                     g = gstr_lookup[key]
                     vals_2a_lookup[key] = {'CGST': g['CGST'], 'SGST': g['SGST'], 'IGST': g['IGST'], 'TYPE': type_lookup.get(key, ''), 'BM': booking_month_2a_lookup.get(key, '')}
+                    matched_2a_keys.add(key)
             # For MISMATCH cases, don't set status here - let fuzzy matching below handle them
             # This allows finding matches with different fiscal year suffixes (e.g., 21-22 vs 22-23)
 
@@ -998,6 +1000,9 @@ def create_itc_result(itc_df, itc_register, gstr_2a, comparison_df=None, merged_
             # Invoice not found in 2A at all (fuzzy match didn't produce exact match)
             status = 'Not found in 2A'
         status_lookup[key] = status
+        # Track matched 2A keys: only when key represents an ITC entry and a real 2A match was found
+        if key in itc_lookup and matched_key is not None and status in ('Matched', 'Higher in 2A', 'Lower in 2A'):
+            matched_2a_keys.add(matched_key)
         # Store 2A values for keys that found a real match in 2A
         if matched_key:
             vals_2a_lookup[key] = {
@@ -1016,6 +1021,8 @@ def create_itc_result(itc_df, itc_register, gstr_2a, comparison_df=None, merged_
             if key in gstr_lookup:
                 g = gstr_lookup[key]
                 vals_2a_lookup[key] = {'CGST': g['CGST'], 'SGST': g['SGST'], 'IGST': g['IGST'], 'TYPE': type_lookup.get(key, ''), 'BM': booking_month_2a_lookup.get(key, '')}
+                if key in itc_lookup:
+                    matched_2a_keys.add(key)
             else:
                 # Try same-GSTIN fuzzy match from gstr_by_gstin
                 gstin_part = key.split('|', 1)[0]
@@ -1025,6 +1032,8 @@ def create_itc_result(itc_df, itc_register, gstr_2a, comparison_df=None, merged_
                     itc_v = itc_lookup.get(key, {"CGST": 0, "SGST": 0, "IGST": 0})
                     best_c = min(cands, key=lambda c: abs(itc_v["CGST"] - c["CGST"]) + abs(itc_v["SGST"] - c["SGST"]) + abs(itc_v["IGST"] - c["IGST"]))
                     vals_2a_lookup[key] = {'CGST': best_c['CGST'], 'SGST': best_c['SGST'], 'IGST': best_c['IGST'], 'TYPE': type_lookup.get(best_c['key'], ''), 'BM': booking_month_2a_lookup.get(best_c['key'], '')}
+                    if key in itc_lookup:
+                        matched_2a_keys.add(best_c['key'])
 
     # Map status back to each original ITC row
     result['Status'] = result['GSTINinvoice_norm'].map(status_lookup).fillna('Unmatched')
@@ -1069,7 +1078,7 @@ def create_itc_result(itc_df, itc_register, gstr_2a, comparison_df=None, merged_
         log_callback(f"ITC Results: Total: {total}, Matched: {matched_count}, Unmatched: {unmatched_count}, Higher in 2A: {higher_count}, Lower in 2A: {lower_count}, Not found in 2A: {not_found_count}")
         log_callback(f"ITC result table created with {total} records (mapped back to original ITC line items)")
 
-    return result
+    return result, matched_2a_keys
 
 
 def match_cdnr_negatives(cdnr_df, cdnra_df, itc_result_df, log_callback=None):
@@ -1825,7 +1834,7 @@ class GSTReconciliationApp(ctk.CTk):
 
         footer_label = ctk.CTkLabel(
             footer_frame,
-            text="Copyright (c) Jatan Rajbhar 2026 | Contact: jatanrajbhar34@gmail.com| https://github.com/jatanrajbhar",
+            text="Copyright (c) Jatan Rajbhar 2026 | Contact: jatanrajbhar34@gmail.com | https://github.com/jatanrajbhar",
             font=ctk.CTkFont(size=11),
             text_color="white"
         )
@@ -2124,7 +2133,7 @@ class GSTReconciliationApp(ctk.CTk):
             self.update_progress(0.9, "Creating ITC results with Status...")
             # Pass original (pre-merged) ITC so all original line items are present in results
             # Use the aggregated comparison dataframe to ensure ITC Results reflect reconciliation (match counts)
-            self.itc_result_df = create_itc_result(original_itc, itc_register, gstr_2a, self.comparison_df, merged_df, self.log)
+            self.itc_result_df, matched_2a_keys = create_itc_result(original_itc, itc_register, gstr_2a, self.comparison_df, merged_df, self.log)
 
             # Step 7.5: CDNR/CDNRA negative value matching
             self.update_progress(0.92, "Step 7.5: Matching CDNR/CDNRA negatives with ITC...")
@@ -2136,7 +2145,7 @@ class GSTReconciliationApp(ctk.CTk):
 
             # Compute unmatched GSTR 2A items (in merged/2A but not in ITC)
             self.update_progress(0.95, "Finding unmatched 2A items...")
-            self.unmatched_2a_df = self._compute_unmatched_2a(merged_df, original_itc)
+            self.unmatched_2a_df = self._compute_unmatched_2a(merged_df, original_itc, matched_2a_keys)
 
             # Complete
             self.update_progress(1.0, "Processing completed!")
@@ -2180,14 +2189,28 @@ class GSTReconciliationApp(ctk.CTk):
         """Show the results download frame"""
         self.results_frame.pack(fill="x", padx=5, pady=5, before=self.progress_frame)
 
-    def _compute_unmatched_2a(self, merged_df, original_itc):
+    def _compute_unmatched_2a(self, merged_df, original_itc, matched_2a_keys=None):
         """Find rows in merged/GSTR 2A that have no matching invoice in ITC."""
         if merged_df is None or merged_df.empty:
             return pd.DataFrame()
+
+        # Compute normalized key for each 2A row
+        merged_keys = merged_df.apply(
+            lambda r: normalize_gstin(str(r.get('GSTN', ''))) + '|' + normalize_invoice(str(r.get('Document_number', ''))),
+            axis=1
+        )
+
+        # Prefer the pre-computed matched_2a_keys from create_itc_result, which uses the same
+        # sophisticated fuzzy matching as the main reconciliation (handles year-prefix and
+        # leading-zero differences like "2020-2021/676" <-> "20-21/676" or "2" <-> "02/20-21").
+        if matched_2a_keys is not None:
+            mask_unmatched = ~merged_keys.isin(matched_2a_keys)
+            return merged_df[mask_unmatched].reset_index(drop=True)
+
+        # Fallback: simple normalized key comparison against ITC keys
         if original_itc is None or original_itc.empty:
             return merged_df.copy()
 
-        # Build set of normalized GSTIN+Invoice keys from ITC
         vendor_gstn_col = None
         vendor_inv_col = None
         for col in original_itc.columns:
@@ -2205,11 +2228,6 @@ class GSTReconciliationApp(ctk.CTk):
             key = normalize_gstin(row[vendor_gstn_col]) + '|' + normalize_invoice(row[vendor_inv_col])
             itc_keys.add(key)
 
-        # Check each merged row
-        merged_keys = merged_df.apply(
-            lambda r: normalize_gstin(str(r.get('GSTN', ''))) + '|' + normalize_invoice(str(r.get('Document_number', ''))),
-            axis=1
-        )
         mask_unmatched = ~merged_keys.isin(itc_keys)
         return merged_df[mask_unmatched].reset_index(drop=True)
 
@@ -2440,7 +2458,7 @@ class GSTReconciliationApp(ctk.CTk):
         debug_win.after(100, lambda: debug_win.attributes('-topmost', False))
         debug_win.attributes('-topmost', True)
 
-        state = {'idx': 0, 'matched': 0, 'skipped': 0, 'total': len(candidates)}
+        state = {'idx': 0, 'matched': 0, 'skipped': 0, 'total': len(candidates), 'history': []}
 
         # Find vendor columns for sibling-row updates
         vendor_gstn_col = None
@@ -2511,6 +2529,11 @@ class GSTReconciliationApp(ctk.CTk):
         btn_frame = ctk.CTkFrame(debug_win, fg_color="transparent")
         btn_frame.pack(fill="x", padx=10, pady=10)
 
+        back_btn = ctk.CTkButton(btn_frame, text="Back", fg_color="#1565C0",
+                                 hover_color="#0D47A1", font=ctk.CTkFont(size=14, weight="bold"),
+                                 width=120, height=40, command=lambda: on_back(), state="disabled")
+        back_btn.pack(side="left", padx=10)
+
         match_btn = ctk.CTkButton(btn_frame, text="Match", fg_color="#2E7D32",
                                   hover_color="#1B5E20", font=ctk.CTkFont(size=14, weight="bold"),
                                   width=200, height=40, command=lambda: on_match())
@@ -2547,6 +2570,11 @@ class GSTReconciliationApp(ctk.CTk):
             if i >= state['total']:
                 show_summary()
                 return
+            # Re-enable buttons in case we came back from summary
+            match_btn.configure(state="normal")
+            skip_btn.configure(state="normal")
+            remarks_entry.configure(state="normal")
+
             p = candidates[i]
             progress_lbl.configure(text=f"Pair {i + 1} of {state['total']}")
             sim_lbl.configure(text=f"Invoice Similarity: {p['similarity']:.0%}")
@@ -2571,13 +2599,30 @@ class GSTReconciliationApp(ctk.CTk):
             remarks_entry.delete(0, 'end')
 
             counter_lbl.configure(text=f"Matched: {state['matched']} | Skipped: {state['skipped']}")
+            # Enable/disable back button
+            back_btn.configure(state="normal" if state['history'] else "disabled")
 
         def on_match():
             p = candidates[state['idx']]
+            # Save previous statuses for undo
+            norm_key = normalize_gstin(p['itc_gstin']) + '|' + p['itc_inv_norm']
+            prev_statuses = {}
+            prev_remarks = {}
+            if vendor_gstn_col and vendor_inv_col:
+                for row_idx, row in self.itc_result_df.iterrows():
+                    row_key = normalize_gstin(str(row[vendor_gstn_col])) + '|' + normalize_invoice(str(row[vendor_inv_col]))
+                    if row_key == norm_key:
+                        prev_statuses[row_idx] = self.itc_result_df.at[row_idx, 'Status']
+                        prev_remarks[row_idx] = self.itc_result_df.at[row_idx, 'Remarks'] if 'Remarks' in self.itc_result_df.columns else ''
+            else:
+                prev_statuses[p['itc_index']] = self.itc_result_df.at[p['itc_index'], 'Status']
+                prev_remarks[p['itc_index']] = self.itc_result_df.at[p['itc_index'], 'Remarks'] if 'Remarks' in self.itc_result_df.columns else ''
+
+            state['history'].append({'action': 'match', 'idx': state['idx'], 'prev_statuses': prev_statuses, 'prev_remarks': prev_remarks})
+
             # Save remarks before moving on
             _save_remarks(p, 'Matched')
             # Update this row and all sibling rows with same GSTIN+Invoice
-            norm_key = normalize_gstin(p['itc_gstin']) + '|' + p['itc_inv_norm']
             if vendor_gstn_col and vendor_inv_col:
                 for row_idx, row in self.itc_result_df.iterrows():
                     row_key = normalize_gstin(str(row[vendor_gstn_col])) + '|' + normalize_invoice(str(row[vendor_inv_col]))
@@ -2593,16 +2638,51 @@ class GSTReconciliationApp(ctk.CTk):
 
         def on_skip():
             p = candidates[state['idx']]
+            # Save previous remarks for undo
+            norm_key = normalize_gstin(p['itc_gstin']) + '|' + p['itc_inv_norm']
+            prev_remarks = {}
+            if vendor_gstn_col and vendor_inv_col:
+                for row_idx, row in self.itc_result_df.iterrows():
+                    row_key = normalize_gstin(str(row[vendor_gstn_col])) + '|' + normalize_invoice(str(row[vendor_inv_col]))
+                    if row_key == norm_key:
+                        prev_remarks[row_idx] = self.itc_result_df.at[row_idx, 'Remarks'] if 'Remarks' in self.itc_result_df.columns else ''
+            else:
+                prev_remarks[p['itc_index']] = self.itc_result_df.at[p['itc_index'], 'Remarks'] if 'Remarks' in self.itc_result_df.columns else ''
+
+            state['history'].append({'action': 'skip', 'idx': state['idx'], 'prev_remarks': prev_remarks})
+
             # Save remarks before moving on
             _save_remarks(p, 'Skipped')
             state['skipped'] += 1
             state['idx'] += 1
             display_pair(state['idx'])
 
+        def on_back():
+            if not state['history']:
+                return
+            entry = state['history'].pop()
+            # Revert counters
+            if entry['action'] == 'match':
+                state['matched'] -= 1
+                # Restore original statuses
+                for row_idx, old_status in entry['prev_statuses'].items():
+                    self.itc_result_df.at[row_idx, 'Status'] = old_status
+            elif entry['action'] == 'skip':
+                state['skipped'] -= 1
+            # Restore original remarks
+            if 'prev_remarks' in entry and 'Remarks' in self.itc_result_df.columns:
+                for row_idx, old_remark in entry['prev_remarks'].items():
+                    self.itc_result_df.at[row_idx, 'Remarks'] = old_remark
+            # Go back to that pair
+            state['idx'] = entry['idx']
+            self.log(f"Debug Back: Reverted pair {entry['idx'] + 1} ({entry['action']})")
+            display_pair(state['idx'])
+
         def show_summary():
             match_btn.configure(state="disabled")
             skip_btn.configure(state="disabled")
             remarks_entry.configure(state="disabled")
+            back_btn.configure(state="normal" if state['history'] else "disabled")
             progress_lbl.configure(text="Review Complete!")
             sim_lbl.configure(text="")
             for lbl in itc_vals.values():
@@ -2782,4 +2862,3 @@ class GSTReconciliationApp(ctk.CTk):
 if __name__ == "__main__":
     app = GSTReconciliationApp()
     app.mainloop()
-
