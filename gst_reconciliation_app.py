@@ -894,9 +894,10 @@ def create_itc_result(itc_df, itc_register, gstr_2a, comparison_df=None, merged_
     gstr_lookup = {row['GSTINinvoice_norm']:{'CGST':row['CGST'],'SGST':row['SGST'],'IGST':row['IGST']} for _, row in gstr_agg.iterrows()}
     itc_lookup = {row['GSTINinvoice_norm']:{'CGST':row.get('CGST',0),'SGST':row.get('SGST',0),'IGST':row.get('IGST',0)} for _, row in itc_agg.iterrows()}
 
-    # Build TYPE and Booking Month lookups from merged_df for 2A columns
+    # Build TYPE, Booking Month and Invoice Number lookups from merged_df for 2A columns
     type_lookup = {}
     booking_month_2a_lookup = {}  # key → booking month string from 2A files
+    inv_2a_lookup = {}  # key → original Document_number (invoice no) from 2A
     if merged_df is not None and not merged_df.empty:
         for _, row in merged_df.iterrows():
             gstin = normalize_gstin(str(row.get('GSTN', '')))
@@ -908,8 +909,10 @@ def create_itc_result(itc_df, itc_register, gstr_2a, comparison_df=None, merged_
                 bm = str(row.get('Booking_Month', '')).strip()
                 if bm:
                     booking_month_2a_lookup[key] = bm
+            if key not in inv_2a_lookup:
+                inv_2a_lookup[key] = str(row.get('Document_number', ''))
     vals_2a_lookup = {}  # key → {'CGST', 'SGST', 'IGST', 'TYPE'}
-    matched_2a_keys = set()  # normalized 2A keys that were matched by some ITC entry
+    matched_2a_status = {}  # normalized 2A key → '2A Status' string ('Matched' / 'Unmatched')
 
     if comparison_df is not None and not comparison_df.empty:
         # Only use MATCH statuses from comparison_df
@@ -928,12 +931,15 @@ def create_itc_result(itc_df, itc_register, gstr_2a, comparison_df=None, merged_
             key = normalize_gstin(gstin_raw) + '|' + normalize_invoice(inv_raw)
             status_raw = str(row.get('Status', '')).upper()
             if status_raw == 'MATCH' or status_raw == 'MATCHED':
-                status_lookup[key] = 'Matched'
-                # Store 2A values for matched keys
+                # Only accept this MATCH if a real 2A entry actually exists for this key.
+                # When ITC amounts aggregate to zero (e.g. invoice + reversal) and 2A has no
+                # entry for that invoice, compare_tables produces a spurious 0-vs-0 MATCH.
+                # In that case, skip here and let the fallback loop assign 'Not found in 2A'.
                 if key in gstr_lookup:
+                    status_lookup[key] = 'Matched'
                     g = gstr_lookup[key]
-                    vals_2a_lookup[key] = {'CGST': g['CGST'], 'SGST': g['SGST'], 'IGST': g['IGST'], 'TYPE': type_lookup.get(key, ''), 'BM': booking_month_2a_lookup.get(key, '')}
-                    matched_2a_keys.add(key)
+                    vals_2a_lookup[key] = {'CGST': g['CGST'], 'SGST': g['SGST'], 'IGST': g['IGST'], 'TYPE': type_lookup.get(key, ''), 'BM': booking_month_2a_lookup.get(key, ''), 'INV': inv_2a_lookup.get(key, 'Not Found'), 'GSTIN': key.split('|', 1)[0]}
+                    matched_2a_status[key] = 'Matched'
             # For MISMATCH cases, don't set status here - let fuzzy matching below handle them
             # This allows finding matches with different fiscal year suffixes (e.g., 21-22 vs 22-23)
 
@@ -962,6 +968,14 @@ def create_itc_result(itc_df, itc_register, gstr_2a, comparison_df=None, merged_
             best = None
             best_diff = None
             for cand in candidates:
+                cand_inv = cand['key'].split('|', 1)[1]
+                # Only allow amount-based matching when invoice numbers have a substring
+                # relationship (one is contained in the other). This handles cross-fiscal-year
+                # formats like '2021676' ↔ '20202021676' or '2' ↔ '22021', while preventing
+                # false matches between genuinely different invoices (e.g. '3344' ↔ '3349').
+                _s, _l = (inv, cand_inv) if len(inv) <= len(cand_inv) else (cand_inv, inv)
+                if _s and _l and not _l.endswith(_s) and not _l.startswith(_s):
+                    continue
                 cg_diff = abs(itc_vals['CGST'] - cand['CGST'])
                 sg_diff = abs(itc_vals['SGST'] - cand['SGST'])
                 ig_diff = abs(itc_vals['IGST'] - cand['IGST'])
@@ -977,6 +991,9 @@ def create_itc_result(itc_df, itc_register, gstr_2a, comparison_df=None, merged_
                 best_cand = None
                 for cand in candidates:
                     cand_inv = cand['key'].split('|',1)[1]
+                    _s2, _l2 = (inv, cand_inv) if len(inv) <= len(cand_inv) else (cand_inv, inv)
+                    if _s2 and _l2 and not _l2.endswith(_s2) and not _l2.startswith(_s2):
+                        continue
                     sim = similarity(inv, cand_inv)
                     if sim > best_sim:
                         best_sim = sim
@@ -990,7 +1007,7 @@ def create_itc_result(itc_df, itc_register, gstr_2a, comparison_df=None, merged_
         sgst_diff = itc_vals['SGST'] - gstr_vals['SGST']
         igst_diff = itc_vals['IGST'] - gstr_vals['IGST']
         exact_match_in_2a = key in gstr_lookup
-        if abs(cgst_diff) <= tolerance and abs(sgst_diff) <= tolerance and abs(igst_diff) <= tolerance:
+        if matched_key is not None and abs(cgst_diff) <= tolerance and abs(sgst_diff) <= tolerance and abs(igst_diff) <= tolerance:
             status = 'Matched'
         elif exact_match_in_2a:
             # Exact invoice found in 2A but amounts differ
@@ -1000,15 +1017,17 @@ def create_itc_result(itc_df, itc_register, gstr_2a, comparison_df=None, merged_
             # Invoice not found in 2A at all (fuzzy match didn't produce exact match)
             status = 'Not found in 2A'
         status_lookup[key] = status
-        # Track matched 2A keys: only when key represents an ITC entry and a real 2A match was found
+        # Track matched 2A status: only when key represents an ITC entry and a real 2A match was found
         if key in itc_lookup and matched_key is not None and status in ('Matched', 'Higher in 2A', 'Lower in 2A'):
-            matched_2a_keys.add(matched_key)
+            matched_2a_status[matched_key] = 'Matched' if status == 'Matched' else 'Unmatched'
         # Store 2A values for keys that found a real match in 2A
         if matched_key:
             vals_2a_lookup[key] = {
                 'CGST': gstr_vals['CGST'], 'SGST': gstr_vals['SGST'], 'IGST': gstr_vals['IGST'],
                 'TYPE': type_lookup.get(matched_key, ''),
-                'BM': booking_month_2a_lookup.get(matched_key, '')
+                'BM': booking_month_2a_lookup.get(matched_key, ''),
+                'INV': inv_2a_lookup.get(matched_key, 'Not Found'),
+                'GSTIN': matched_key.split('|', 1)[0]
             }
 
     # Ensure consistency between Status and 2A column values
@@ -1020,20 +1039,33 @@ def create_itc_result(itc_df, itc_register, gstr_2a, comparison_df=None, merged_
             # Found in comparison/matching but vals_2a_lookup not yet populated
             if key in gstr_lookup:
                 g = gstr_lookup[key]
-                vals_2a_lookup[key] = {'CGST': g['CGST'], 'SGST': g['SGST'], 'IGST': g['IGST'], 'TYPE': type_lookup.get(key, ''), 'BM': booking_month_2a_lookup.get(key, '')}
+                vals_2a_lookup[key] = {'CGST': g['CGST'], 'SGST': g['SGST'], 'IGST': g['IGST'], 'TYPE': type_lookup.get(key, ''), 'BM': booking_month_2a_lookup.get(key, ''), 'INV': inv_2a_lookup.get(key, 'Not Found'), 'GSTIN': key.split('|', 1)[0]}
                 if key in itc_lookup:
-                    matched_2a_keys.add(key)
+                    matched_2a_status[key] = 'Matched' if status == 'Matched' else 'Unmatched'
             else:
                 # Try same-GSTIN fuzzy match from gstr_by_gstin
+                # Apply the same substring constraint as the main fallback loop to prevent
+                # false matches between invoices with unrelated numbers.
                 gstin_part = key.split('|', 1)[0]
+                inv_part = key.split('|', 1)[1]
                 cands = gstr_by_gstin.get(gstin_part, [])
-                if cands:
+                # Filter candidates using suffix/prefix check to prevent short invoice numbers
+                # (e.g. '10') from matching unrelated longer strings (e.g. '20202105').
+                # A match is allowed only when the shorter number appears at the END or START
+                # of the longer one (e.g. '10' at end of '20202110', '676' at end of '20202021676').
+                filtered_cands = []
+                for _fc in cands:
+                    _ci = _fc['key'].split('|', 1)[1]
+                    _s3, _l3 = (inv_part, _ci) if len(inv_part) <= len(_ci) else (_ci, inv_part)
+                    if not _s3 or not _l3 or _l3.endswith(_s3) or _l3.startswith(_s3):
+                        filtered_cands.append(_fc)
+                if filtered_cands:
                     # Pick the candidate with smallest total tax difference to ITC
                     itc_v = itc_lookup.get(key, {"CGST": 0, "SGST": 0, "IGST": 0})
-                    best_c = min(cands, key=lambda c: abs(itc_v["CGST"] - c["CGST"]) + abs(itc_v["SGST"] - c["SGST"]) + abs(itc_v["IGST"] - c["IGST"]))
-                    vals_2a_lookup[key] = {'CGST': best_c['CGST'], 'SGST': best_c['SGST'], 'IGST': best_c['IGST'], 'TYPE': type_lookup.get(best_c['key'], ''), 'BM': booking_month_2a_lookup.get(best_c['key'], '')}
+                    best_c = min(filtered_cands, key=lambda c: abs(itc_v["CGST"] - c["CGST"]) + abs(itc_v["SGST"] - c["SGST"]) + abs(itc_v["IGST"] - c["IGST"]))
+                    vals_2a_lookup[key] = {'CGST': best_c['CGST'], 'SGST': best_c['SGST'], 'IGST': best_c['IGST'], 'TYPE': type_lookup.get(best_c['key'], ''), 'BM': booking_month_2a_lookup.get(best_c['key'], ''), 'INV': inv_2a_lookup.get(best_c['key'], 'Not Found'), 'GSTIN': best_c['key'].split('|', 1)[0]}
                     if key in itc_lookup:
-                        matched_2a_keys.add(best_c['key'])
+                        matched_2a_status[best_c['key']] = 'Matched' if status == 'Matched' else 'Unmatched'
 
     # Map status back to each original ITC row
     result['Status'] = result['GSTINinvoice_norm'].map(status_lookup).fillna('Unmatched')
@@ -1060,6 +1092,13 @@ def create_itc_result(itc_df, itc_register, gstr_2a, comparison_df=None, merged_
     else:
         result['Booking Month as per ITC'] = ''
 
+    # Add 2A Invoice No column: the original invoice number from the matched 2A row
+    result['2A Invoice No'] = result['GSTINinvoice_norm'].map(
+        lambda k: vals_2a_lookup[k]['INV'] if k in vals_2a_lookup and 'INV' in vals_2a_lookup[k] else 'Not Found')
+    # Add 2A GSTIN column: the GSTIN of the matched 2A supplier
+    result['2A GSTIN'] = result['GSTINinvoice_norm'].map(
+        lambda k: vals_2a_lookup[k]['GSTIN'] if k in vals_2a_lookup and 'GSTIN' in vals_2a_lookup[k] else 'Not Found')
+
     # Add Remarks column (empty by default, populated during debug matching)
     result['Remarks'] = ''
 
@@ -1078,7 +1117,7 @@ def create_itc_result(itc_df, itc_register, gstr_2a, comparison_df=None, merged_
         log_callback(f"ITC Results: Total: {total}, Matched: {matched_count}, Unmatched: {unmatched_count}, Higher in 2A: {higher_count}, Lower in 2A: {lower_count}, Not found in 2A: {not_found_count}")
         log_callback(f"ITC result table created with {total} records (mapped back to original ITC line items)")
 
-    return result, matched_2a_keys
+    return result, matched_2a_status
 
 
 def match_cdnr_negatives(cdnr_df, cdnra_df, itc_result_df, log_callback=None):
@@ -1089,7 +1128,7 @@ def match_cdnr_negatives(cdnr_df, cdnra_df, itc_result_df, log_callback=None):
     Only upgrades unmatched ITC rows to 'Matched' — never downgrades already-matched rows.
     """
     if itc_result_df is None or itc_result_df.empty:
-        return itc_result_df
+        return itc_result_df, set()
 
     # Combine CDNR + remaining CDNRA
     cdnr_frames = []
@@ -1100,23 +1139,25 @@ def match_cdnr_negatives(cdnr_df, cdnra_df, itc_result_df, log_callback=None):
     if not cdnr_frames:
         if log_callback:
             log_callback("CDNR matching: No CDNR/CDNRA data available, skipping")
-        return itc_result_df
+        return itc_result_df, set()
 
     combined_cdnr = pd.concat(cdnr_frames, ignore_index=True)
 
     # Find CDNR columns
     cdnr_gstin_col = None
+    cdnr_doc_col = None  # Note No column for tracking matched 2A keys
     cdnr_cgst_col, cdnr_sgst_col, cdnr_igst_col = find_tax_amount_columns(combined_cdnr)
     for col in combined_cdnr.columns:
         cl = col.lower().strip()
         if 'gstin' in cl or 'gstn' in cl:
             cdnr_gstin_col = col
-            break
+        if ('note no' in cl or 'invoice no' in cl or 'boe no' in cl) and not cdnr_doc_col:
+            cdnr_doc_col = col
 
     if not cdnr_gstin_col:
         if log_callback:
             log_callback("CDNR matching: Could not find GSTIN column in CDNR, skipping")
-        return itc_result_df
+        return itc_result_df, set()
 
     # Find SGST column in CDNR for 2A column values
     cdnr_sgst_col = None
@@ -1165,14 +1206,19 @@ def match_cdnr_negatives(cdnr_df, cdnra_df, itc_result_df, log_callback=None):
         if key not in cdnr_keys:
             cdnr_keys[key] = []
         cdnr_bm = str(row.get(cdnr_bm_col, '')).strip() if cdnr_bm_col else ''
+        cdnr_note_no = str(row.get(cdnr_doc_col, '')).strip() if cdnr_doc_col else ''
         cdnr_keys[key].append({
-            'CGST': orig_cgst, 'SGST': orig_sgst, 'IGST': orig_igst, 'TYPE': src_type, 'BM': cdnr_bm
+            'CGST': orig_cgst, 'SGST': orig_sgst, 'IGST': orig_igst, 'TYPE': src_type, 'BM': cdnr_bm,
+            'GSTIN': gstin, 'NOTE_NO': cdnr_note_no
         })
 
     if not cdnr_keys:
         if log_callback:
             log_callback("CDNR matching: No valid CDNR entries with non-zero tax, skipping")
-        return itc_result_df
+        return itc_result_df, set()
+
+    # Set to track which 2A (CDNR) normalized keys were matched
+    matched_cdnr_2a_keys = set()
 
     # Find ITC columns
     itc_gstin_col = None
@@ -1188,7 +1234,7 @@ def match_cdnr_negatives(cdnr_df, cdnra_df, itc_result_df, log_callback=None):
     if not itc_gstin_col or not itc_inv_col:
         if log_callback:
             log_callback("CDNR matching: Could not find GSTIN/Invoice columns in ITC, skipping")
-        return itc_result_df
+        return itc_result_df, set()
 
     # Statuses that should NOT be changed (already matched)
     protected_statuses = {'Matched', 'Matched but invoice number is not accurate'}
@@ -1238,6 +1284,10 @@ def match_cdnr_negatives(cdnr_df, cdnra_df, itc_result_df, log_callback=None):
             cdnr_info = cdnr_keys[key].pop()  # consume one CDNR entry
             matched_norm_keys.add(inv_key)
             matched_cdnr_info[inv_key] = cdnr_info
+            # Track the matched CDNR 2A key (GSTIN + normalized Note No)
+            cdnr_2a_key = cdnr_info.get('GSTIN', gstin) + '|' + normalize_invoice(cdnr_info.get('NOTE_NO', ''))
+            if cdnr_2a_key.split('|', 1)[1]:  # only add if Note No is non-empty
+                matched_cdnr_2a_keys.add(cdnr_2a_key)
 
     # Update all sibling rows for matched invoices
     has_2a_cols = 'CGST as per 2A' in result.columns
@@ -1263,7 +1313,7 @@ def match_cdnr_negatives(cdnr_df, cdnra_df, itc_result_df, log_callback=None):
     if log_callback:
         log_callback(f"CDNR matching: {matched_count} invoices ({matched_rows} rows) matched via CDNR/CDNRA negative matching")
 
-    return result
+    return result, matched_cdnr_2a_keys
 
 
 def create_comprehensive_report(itc_df, itc_register, merged_df, comparison_df, log_callback=None):
@@ -1573,6 +1623,7 @@ class GSTReconciliationApp(ctk.CTk):
         self.comparison_df = None
         self.itc_result_df = None
         self.unmatched_2a_df = None
+        self.gstr_2a_results_df = None
         self.merged_df = None
 
         # Create main layout
@@ -1788,25 +1839,15 @@ class GSTReconciliationApp(ctk.CTk):
         )
         self.download_reconciliation_btn.pack(side="left", padx=10, pady=5)
 
-        self.download_unmatched_itc_btn = ctk.CTkButton(
+        self.download_2a_results_btn = ctk.CTkButton(
             buttons_container,
-            text="Download Unmatched in ITC",
-            command=self.download_unmatched_itc,
-            fg_color="#E65100",
-            hover_color="#BF360C",
-            width=250
-        )
-        self.download_unmatched_itc_btn.pack(side="left", padx=10, pady=5)
-
-        self.download_unmatched_2a_btn = ctk.CTkButton(
-            buttons_container,
-            text="Download Unmatched in 2A",
-            command=self.download_unmatched_2a,
+            text="Download 2A Results",
+            command=self.download_2a_results,
             fg_color="#1565C0",
             hover_color="#0D47A1",
-            width=250
+            width=220
         )
-        self.download_unmatched_2a_btn.pack(side="left", padx=10, pady=5)
+        self.download_2a_results_btn.pack(side="left", padx=10, pady=5)
 
         self.view_results_btn = ctk.CTkButton(
             buttons_container,
@@ -1834,7 +1875,7 @@ class GSTReconciliationApp(ctk.CTk):
 
         footer_label = ctk.CTkLabel(
             footer_frame,
-            text="Copyright (c) Jatan Rajbhar 2026 | Contact: jatanrajbhar34@gmail.com | https://github.com/jatanrajbhar",
+            text="Copyright (c) GSC in time 2026 | Contact: info@gscintime.com | https://www.gscintime.com | +91-22-4612 5600",
             font=ctk.CTkFont(size=11),
             text_color="white"
         )
@@ -2133,19 +2174,32 @@ class GSTReconciliationApp(ctk.CTk):
             self.update_progress(0.9, "Creating ITC results with Status...")
             # Pass original (pre-merged) ITC so all original line items are present in results
             # Use the aggregated comparison dataframe to ensure ITC Results reflect reconciliation (match counts)
-            self.itc_result_df, matched_2a_keys = create_itc_result(original_itc, itc_register, gstr_2a, self.comparison_df, merged_df, self.log)
+            self.itc_result_df, matched_2a_status = create_itc_result(original_itc, itc_register, gstr_2a, self.comparison_df, merged_df, self.log)
 
             # Step 7.5: CDNR/CDNRA negative value matching
             self.update_progress(0.92, "Step 7.5: Matching CDNR/CDNRA negatives with ITC...")
-            self.itc_result_df = match_cdnr_negatives(
+            self.itc_result_df, matched_cdnr_2a_keys = match_cdnr_negatives(
                 tables.get('CDNR', pd.DataFrame()),
                 tables.get('CDNRA', pd.DataFrame()),
                 self.itc_result_df, self.log
             )
+            # Update matched_2a_status with CDNR rows matched by the CDNR negative matcher
+            matched_2a_status.update({k: 'Matched' for k in matched_cdnr_2a_keys})
 
-            # Compute unmatched GSTR 2A items (in merged/2A but not in ITC)
-            self.update_progress(0.95, "Finding unmatched 2A items...")
-            self.unmatched_2a_df = self._compute_unmatched_2a(merged_df, original_itc, matched_2a_keys)
+            # Build 2A Results: all merged rows with Status column
+            self.update_progress(0.95, "Building 2A Results...")
+            gstr_2a_results = merged_df.copy()
+            gstr_2a_results['Status'] = gstr_2a_results.apply(
+                lambda r: matched_2a_status.get(
+                    normalize_gstin(str(r.get('GSTN', ''))) + '|' + normalize_invoice(str(r.get('Document_number', ''))),
+                    'Not Found in ITC'
+                ),
+                axis=1
+            )
+            self.gstr_2a_results_df = gstr_2a_results
+
+            # Keep unmatched_2a_df (rows with no ITC entry) for debug matching functionality
+            self.unmatched_2a_df = self._compute_unmatched_2a(merged_df, original_itc, matched_2a_status)
 
             # Complete
             self.update_progress(1.0, "Processing completed!")
@@ -2189,7 +2243,7 @@ class GSTReconciliationApp(ctk.CTk):
         """Show the results download frame"""
         self.results_frame.pack(fill="x", padx=5, pady=5, before=self.progress_frame)
 
-    def _compute_unmatched_2a(self, merged_df, original_itc, matched_2a_keys=None):
+    def _compute_unmatched_2a(self, merged_df, original_itc, matched_2a_status=None):
         """Find rows in merged/GSTR 2A that have no matching invoice in ITC."""
         if merged_df is None or merged_df.empty:
             return pd.DataFrame()
@@ -2200,11 +2254,11 @@ class GSTReconciliationApp(ctk.CTk):
             axis=1
         )
 
-        # Prefer the pre-computed matched_2a_keys from create_itc_result, which uses the same
+        # Prefer the pre-computed matched_2a_status from create_itc_result, which uses the same
         # sophisticated fuzzy matching as the main reconciliation (handles year-prefix and
         # leading-zero differences like "2020-2021/676" <-> "20-21/676" or "2" <-> "02/20-21").
-        if matched_2a_keys is not None:
-            mask_unmatched = ~merged_keys.isin(matched_2a_keys)
+        if matched_2a_status is not None:
+            mask_unmatched = ~merged_keys.isin(matched_2a_status.keys())
             return merged_df[mask_unmatched].reset_index(drop=True)
 
         # Fallback: simple normalized key comparison against ITC keys
@@ -2250,15 +2304,9 @@ class GSTReconciliationApp(ctk.CTk):
                 with pd.ExcelWriter(output, engine='openpyxl') as writer:
                     download_df.to_excel(writer, sheet_name='ITC_Results', index=False)
 
-                    # Unmatched in ITC (includes Unmatched, Higher in 2A, Lower in 2A)
-                    if self.itc_result_df is not None and 'Status' in self.itc_result_df.columns:
-                        unmatched_itc = self.itc_result_df[self.itc_result_df['Status'].isin(['Unmatched', 'Higher in 2A', 'Lower in 2A', 'Not found in 2A'])]
-                        if not unmatched_itc.empty:
-                            unmatched_itc.to_excel(writer, sheet_name='Unmatched_in_ITC', index=False)
-
-                    # Unmatched in 2A
-                    if self.unmatched_2a_df is not None and not self.unmatched_2a_df.empty:
-                        self.unmatched_2a_df.to_excel(writer, sheet_name='Unmatched_in_2A', index=False)
+                    # 2A Results: all rows from GSTR 2A with Status
+                    if self.gstr_2a_results_df is not None and not self.gstr_2a_results_df.empty:
+                        self.gstr_2a_results_df.to_excel(writer, sheet_name='2A_Results', index=False)
 
                 output.seek(0)
                 with open(filepath, 'wb') as f:
@@ -2269,49 +2317,23 @@ class GSTReconciliationApp(ctk.CTk):
             self.log(f"Error saving report: {str(e)}")
             messagebox.showerror("Error", f"Failed to save report: {str(e)}")
 
-    def download_unmatched_itc(self):
-        """Download unmatched ITC items as Excel"""
-        if self.itc_result_df is None or self.itc_result_df.empty:
-            messagebox.showwarning("Warning", "No ITC data available!")
-            return
-
-        unmatched_itc = self.itc_result_df[self.itc_result_df['Status'].isin(['Unmatched', 'Higher in 2A', 'Lower in 2A', 'Not found in 2A'])]
-        if unmatched_itc.empty:
-            messagebox.showinfo("Info", "No unmatched ITC items found!")
+    def download_2a_results(self):
+        """Download 2A Results (all GSTR 2A rows with Status) as Excel"""
+        if self.gstr_2a_results_df is None or self.gstr_2a_results_df.empty:
+            messagebox.showinfo("Info", "No 2A results available!")
             return
 
         try:
             filepath = filedialog.asksaveasfilename(
-                title="Save Unmatched in ITC",
+                title="Save 2A Results",
                 defaultextension=".xlsx",
                 filetypes=[("Excel files", "*.xlsx")],
-                initialfile="Unmatched_in_ITC.xlsx"
+                initialfile="2A_Results.xlsx"
             )
             if filepath:
-                unmatched_itc.to_excel(filepath, index=False, engine='openpyxl')
-                self.log(f"Unmatched in ITC saved to: {filepath}")
-                messagebox.showinfo("Success", f"Unmatched in ITC saved successfully!\n\nRecords: {len(unmatched_itc)}\nLocation: {filepath}")
-        except Exception as e:
-            self.log(f"Error saving report: {str(e)}")
-            messagebox.showerror("Error", f"Failed to save report: {str(e)}")
-
-    def download_unmatched_2a(self):
-        """Download unmatched GSTR 2A items as Excel"""
-        if self.unmatched_2a_df is None or self.unmatched_2a_df.empty:
-            messagebox.showinfo("Info", "No unmatched GSTR 2A items found!")
-            return
-
-        try:
-            filepath = filedialog.asksaveasfilename(
-                title="Save Unmatched in 2A",
-                defaultextension=".xlsx",
-                filetypes=[("Excel files", "*.xlsx")],
-                initialfile="Unmatched_in_2A.xlsx"
-            )
-            if filepath:
-                self.unmatched_2a_df.to_excel(filepath, index=False, engine='openpyxl')
-                self.log(f"Unmatched in 2A saved to: {filepath}")
-                messagebox.showinfo("Success", f"Unmatched in 2A saved successfully!\n\nRecords: {len(self.unmatched_2a_df)}\nLocation: {filepath}")
+                self.gstr_2a_results_df.to_excel(filepath, index=False, engine='openpyxl')
+                self.log(f"2A Results saved to: {filepath}")
+                messagebox.showinfo("Success", f"2A Results saved successfully!\n\nRecords: {len(self.gstr_2a_results_df)}\nLocation: {filepath}")
         except Exception as e:
             self.log(f"Error saving report: {str(e)}")
             messagebox.showerror("Error", f"Failed to save report: {str(e)}")
@@ -2726,21 +2748,13 @@ class GSTReconciliationApp(ctk.CTk):
                                               'Not found in 2A': '#e1bee7',
                                               'Matched but invoice number is not accurate': '#ffe0b2'})
 
-        # Tab 2: Unmatched in ITC (includes Unmatched, Higher in 2A, Lower in 2A)
-        unmatched_itc = self.itc_result_df[self.itc_result_df['Status'].isin(['Unmatched', 'Higher in 2A', 'Lower in 2A', 'Not found in 2A'])]
-        tab2 = tabview.add("Unmatched in ITC")
-        if not unmatched_itc.empty:
-            self.create_data_table(tab2, unmatched_itc, status_field='Status',
-                                   status_values={'Unmatched': '#ffcdd2', 'Higher in 2A': '#fff9c4', 'Lower in 2A': '#bbdefb', 'Not found in 2A': '#e1bee7'})
+        # Tab 2: 2A Results (all GSTR 2A rows with Status)
+        tab2 = tabview.add("2A Results")
+        if self.gstr_2a_results_df is not None and not self.gstr_2a_results_df.empty:
+            self.create_data_table(tab2, self.gstr_2a_results_df, status_field='Status',
+                                   status_values={'Matched': '#c8e6c9', 'Unmatched': '#fff9c4', 'Not Found in ITC': '#ffcdd2'})
         else:
-            ctk.CTkLabel(tab2, text="No unmatched ITC items found!", font=ctk.CTkFont(size=16)).pack(pady=50)
-
-        # Tab 3: Unmatched in 2A
-        tab3 = tabview.add("Unmatched in 2A")
-        if self.unmatched_2a_df is not None and not self.unmatched_2a_df.empty:
-            self.create_data_table(tab3, self.unmatched_2a_df)
-        else:
-            ctk.CTkLabel(tab3, text="No unmatched GSTR 2A items found!", font=ctk.CTkFont(size=16)).pack(pady=50)
+            ctk.CTkLabel(tab2, text="No 2A results available!", font=ctk.CTkFont(size=16)).pack(pady=50)
 
     def create_data_table(self, parent, df, status_field=None, status_values=None):
         """Create a data table with treeview.
