@@ -938,8 +938,13 @@ def create_itc_result(itc_df, itc_register, gstr_2a, comparison_df=None, merged_
                 if key in gstr_lookup:
                     status_lookup[key] = 'Matched'
                     g = gstr_lookup[key]
-                    vals_2a_lookup[key] = {'CGST': g['CGST'], 'SGST': g['SGST'], 'IGST': g['IGST'], 'TYPE': type_lookup.get(key, ''), 'BM': booking_month_2a_lookup.get(key, ''), 'INV': inv_2a_lookup.get(key, 'Not Found'), 'GSTIN': key.split('|', 1)[0]}
-                    matched_2a_status[key] = 'Matched'
+                    vals_2a_lookup[key] = {'CGST': g['CGST'], 'SGST': g['SGST'], 'IGST': g['IGST'], 'TYPE': type_lookup.get(key, ''), 'BM': booking_month_2a_lookup.get(key, ''), 'INV': inv_2a_lookup.get(key, 'Not Found'), 'GSTIN': key.split('|', 1)[0], '_2A_KEY': key}
+                    # Only mark 2A entry as Matched when there is a real ITC entry for this key.
+                    # Pure 2A-only keys (no ITC counterpart) with small amounts can get a spurious
+                    # MATCH from compare_tables (0 ITC vs small 2A ≤ tolerance). Without this
+                    # guard those entries incorrectly show Status='Matched' in 2A Results.
+                    if key in itc_lookup:
+                        matched_2a_status[key] = 'Matched'
             # For MISMATCH cases, don't set status here - let fuzzy matching below handle them
             # This allows finding matches with different fiscal year suffixes (e.g., 21-22 vs 22-23)
 
@@ -1027,7 +1032,8 @@ def create_itc_result(itc_df, itc_register, gstr_2a, comparison_df=None, merged_
                 'TYPE': type_lookup.get(matched_key, ''),
                 'BM': booking_month_2a_lookup.get(matched_key, ''),
                 'INV': inv_2a_lookup.get(matched_key, 'Not Found'),
-                'GSTIN': matched_key.split('|', 1)[0]
+                'GSTIN': matched_key.split('|', 1)[0],
+                '_2A_KEY': matched_key
             }
 
     # Ensure consistency between Status and 2A column values
@@ -1039,7 +1045,7 @@ def create_itc_result(itc_df, itc_register, gstr_2a, comparison_df=None, merged_
             # Found in comparison/matching but vals_2a_lookup not yet populated
             if key in gstr_lookup:
                 g = gstr_lookup[key]
-                vals_2a_lookup[key] = {'CGST': g['CGST'], 'SGST': g['SGST'], 'IGST': g['IGST'], 'TYPE': type_lookup.get(key, ''), 'BM': booking_month_2a_lookup.get(key, ''), 'INV': inv_2a_lookup.get(key, 'Not Found'), 'GSTIN': key.split('|', 1)[0]}
+                vals_2a_lookup[key] = {'CGST': g['CGST'], 'SGST': g['SGST'], 'IGST': g['IGST'], 'TYPE': type_lookup.get(key, ''), 'BM': booking_month_2a_lookup.get(key, ''), 'INV': inv_2a_lookup.get(key, 'Not Found'), 'GSTIN': key.split('|', 1)[0], '_2A_KEY': key}
                 if key in itc_lookup:
                     matched_2a_status[key] = 'Matched' if status == 'Matched' else 'Unmatched'
             else:
@@ -1063,21 +1069,70 @@ def create_itc_result(itc_df, itc_register, gstr_2a, comparison_df=None, merged_
                     # Pick the candidate with smallest total tax difference to ITC
                     itc_v = itc_lookup.get(key, {"CGST": 0, "SGST": 0, "IGST": 0})
                     best_c = min(filtered_cands, key=lambda c: abs(itc_v["CGST"] - c["CGST"]) + abs(itc_v["SGST"] - c["SGST"]) + abs(itc_v["IGST"] - c["IGST"]))
-                    vals_2a_lookup[key] = {'CGST': best_c['CGST'], 'SGST': best_c['SGST'], 'IGST': best_c['IGST'], 'TYPE': type_lookup.get(best_c['key'], ''), 'BM': booking_month_2a_lookup.get(best_c['key'], ''), 'INV': inv_2a_lookup.get(best_c['key'], 'Not Found'), 'GSTIN': best_c['key'].split('|', 1)[0]}
+                    vals_2a_lookup[key] = {'CGST': best_c['CGST'], 'SGST': best_c['SGST'], 'IGST': best_c['IGST'], 'TYPE': type_lookup.get(best_c['key'], ''), 'BM': booking_month_2a_lookup.get(best_c['key'], ''), 'INV': inv_2a_lookup.get(best_c['key'], 'Not Found'), 'GSTIN': best_c['key'].split('|', 1)[0], '_2A_KEY': best_c['key']}
                     if key in itc_lookup:
                         matched_2a_status[best_c['key']] = 'Matched' if status == 'Matched' else 'Unmatched'
+
+    # Enforce one-to-one matching: if multiple ITC keys claimed the same 2A key via fuzzy matching,
+    # keep only the best match (lowest total tax diff; exact key match wins ties) and set the rest
+    # to 'Not found in 2A'.  This prevents false double-counting of 2A CGST/SGST/IGST totals
+    # when two ITC entries like '90620634' and '90620634 CANCELL' both match the same 2A entry.
+    _a2a_claims = {}
+    for _itc_k, _vals in vals_2a_lookup.items():
+        _a2a_k = _vals.get('_2A_KEY')
+        if not _a2a_k or _itc_k not in itc_lookup:
+            continue
+        _itc_v = itc_lookup.get(_itc_k, {'CGST': 0, 'SGST': 0, 'IGST': 0})
+        _diff = abs(_itc_v['CGST'] - _vals['CGST']) + abs(_itc_v['SGST'] - _vals['SGST']) + abs(_itc_v['IGST'] - _vals['IGST'])
+        if _itc_k == _a2a_k:
+            _diff = -1  # exact key match gets top priority
+        _a2a_claims.setdefault(_a2a_k, []).append((_itc_k, _diff))
+    for _a2a_k, _claimants in _a2a_claims.items():
+        if len(_claimants) <= 1:
+            continue
+        _claimants.sort(key=lambda x: x[1])
+        for _loser_k, _ in _claimants[1:]:
+            if status_lookup.get(_loser_k) in ('Matched', 'Higher in 2A', 'Lower in 2A'):
+                status_lookup[_loser_k] = 'Not found in 2A'
+                vals_2a_lookup.pop(_loser_k, None)
 
     # Map status back to each original ITC row
     result['Status'] = result['GSTINinvoice_norm'].map(status_lookup).fillna('Unmatched')
 
     # Add 2A columns (CGST/SGST/IGST as per 2A, Type)
     not_found_label = 'Not found in 2A'
-    result['CGST as per 2A'] = result['GSTINinvoice_norm'].map(
-        lambda k: vals_2a_lookup[k]['CGST'] if k in vals_2a_lookup else not_found_label)
-    result['SGST as per 2A'] = result['GSTINinvoice_norm'].map(
-        lambda k: vals_2a_lookup[k]['SGST'] if k in vals_2a_lookup else not_found_label)
-    result['IGST as per 2A'] = result['GSTINinvoice_norm'].map(
-        lambda k: vals_2a_lookup[k]['IGST'] if k in vals_2a_lookup else not_found_label)
+
+    # When multiple ITC rows share the same invoice key (duplicate invoice numbers),
+    # distribute 2A aggregate values proportionally based on each row's ITC share.
+    # E.g. if ITC rows are 1000 and 500 (total 1500) and 2A total is 1500,
+    # row 1 gets 1000 and row 2 gets 500 — not 1500 repeated on both rows.
+    _r = result  # alias for brevity
+    _itc_c = _r[itc_cgst_col].apply(safe_numeric_conversion) if itc_cgst_col else pd.Series(0.0, index=_r.index)
+    _itc_s = _r[itc_sgst_col].apply(safe_numeric_conversion) if itc_sgst_col else pd.Series(0.0, index=_r.index)
+    _itc_i = _r[itc_igst_col].apply(safe_numeric_conversion) if itc_igst_col else pd.Series(0.0, index=_r.index)
+    _key_c_sum = _itc_c.groupby(_r['GSTINinvoice_norm']).transform('sum')
+    _key_s_sum = _itc_s.groupby(_r['GSTINinvoice_norm']).transform('sum')
+    _key_i_sum = _itc_i.groupby(_r['GSTINinvoice_norm']).transform('sum')
+    _key_cnt   = _r.groupby('GSTINinvoice_norm')['GSTINinvoice_norm'].transform('count')
+
+    def _prop_val(k, tax_key, itc_row_val, itc_key_total, row_cnt):
+        if k not in vals_2a_lookup:
+            return not_found_label
+        v = vals_2a_lookup[k][tax_key]
+        if isinstance(v, str):
+            return v
+        if row_cnt == 1:
+            return v  # single row — no distribution needed
+        if itc_key_total != 0:
+            return round(itc_row_val / itc_key_total * v, 2)
+        return round(v / row_cnt, 2)  # equal split when ITC total is zero
+
+    result['CGST as per 2A'] = [_prop_val(k, 'CGST', c, ct, n)
+        for k, c, ct, n in zip(_r['GSTINinvoice_norm'], _itc_c, _key_c_sum, _key_cnt)]
+    result['SGST as per 2A'] = [_prop_val(k, 'SGST', s, st, n)
+        for k, s, st, n in zip(_r['GSTINinvoice_norm'], _itc_s, _key_s_sum, _key_cnt)]
+    result['IGST as per 2A'] = [_prop_val(k, 'IGST', i, it, n)
+        for k, i, it, n in zip(_r['GSTINinvoice_norm'], _itc_i, _key_i_sum, _key_cnt)]
     result['Type'] = result['GSTINinvoice_norm'].map(
         lambda k: vals_2a_lookup[k]['TYPE'] if k in vals_2a_lookup else not_found_label)
 
@@ -1099,8 +1154,31 @@ def create_itc_result(itc_df, itc_register, gstr_2a, comparison_df=None, merged_
     result['2A GSTIN'] = result['GSTINinvoice_norm'].map(
         lambda k: vals_2a_lookup[k]['GSTIN'] if k in vals_2a_lookup and 'GSTIN' in vals_2a_lookup[k] else 'Not Found')
 
-    # Add Remarks column (empty by default, populated during debug matching)
-    result['Remarks'] = ''
+    # Auto-remarks for many-to-one / one-to-many matches
+    # Case 1: single ITC invoice matched with multiple 2A invoice rows (same norm key in 2A)
+    _2a_row_count = gstr_2a_local.groupby('GSTINinvoice_norm').size().to_dict()
+    # Case 2: multiple distinct ITC invoice keys mapped to same 2A key (via fuzzy match)
+    _2a_key_to_itc_keys = {}
+    for _ik, _vv in vals_2a_lookup.items():
+        _ak = _vv.get('_2A_KEY')
+        if _ak and _ik in itc_lookup:
+            _2a_key_to_itc_keys.setdefault(_ak, set()).add(_ik)
+
+    _matched_statuses = {'Matched', 'Higher in 2A', 'Lower in 2A'}
+    remark_list = []
+    for _nk in result['GSTINinvoice_norm']:
+        _status = status_lookup.get(_nk, '')
+        if _status not in _matched_statuses or _nk not in vals_2a_lookup:
+            remark_list.append('')
+            continue
+        _ak = vals_2a_lookup[_nk].get('_2A_KEY', _nk)
+        _parts = []
+        if _2a_row_count.get(_ak, 1) > 1:
+            _parts.append('invoice matches with multiple invoice in 2a')
+        if len(_2a_key_to_itc_keys.get(_ak, set())) > 1:
+            _parts.append('multiple invoice matches with single invoice in 2A')
+        remark_list.append('; '.join(_parts))
+    result['Remarks'] = remark_list
 
     # Clean helper columns
     result = result.drop(columns=[c for c in ['GSTINinvoice_norm','_norm_gstin','_norm_inv'] if c in result.columns])
@@ -2196,6 +2274,17 @@ class GSTReconciliationApp(ctk.CTk):
                 ),
                 axis=1
             )
+            # Negate CGST/SGST/IGST for CDNR/CDNRA rows so 2A totals align with ITC sign convention.
+            # ITC records credit notes as negative amounts (reducing ITC), while raw GSTR-2A files
+            # store them as positive.  Negating here ensures that filtering by Matched status and
+            # summing tax columns gives consistent totals in both sheets.
+            _cdnr_mask = gstr_2a_results.get('TYPE', pd.Series(dtype=str)).astype(str).str.upper().isin(['CDNR', 'CDNRA'])
+            if _cdnr_mask.any():
+                for _col in ['CGST', 'SGST', 'IGST']:
+                    if _col in gstr_2a_results.columns:
+                        gstr_2a_results.loc[_cdnr_mask, _col] = (
+                            gstr_2a_results.loc[_cdnr_mask, _col].apply(safe_numeric_conversion) * -1
+                        )
             self.gstr_2a_results_df = gstr_2a_results
 
             # Keep unmatched_2a_df (rows with no ITC entry) for debug matching functionality
@@ -2393,6 +2482,8 @@ class GSTReconciliationApp(ctk.CTk):
                 'igst': safe_numeric_conversion(row.get('IGST', 0)),
                 'tax': safe_numeric_conversion(row.get('TAX', 0)),
                 'date': str(row.get('Invoice_Date', '')),
+                'booking_month': str(row.get('Booking_Month', '')),
+                'type': str(row.get('TYPE', '')),
             })
 
         used_2a = set()
@@ -2441,6 +2532,8 @@ class GSTReconciliationApp(ctk.CTk):
                     'twoa_cgst': best['cgst'],
                     'twoa_sgst': best['sgst'],
                     'twoa_igst': best['igst'],
+                    'twoa_booking_month': best['booking_month'],
+                    'twoa_type': best['type'],
                     'similarity': best_sim,
                     'itc_inv_norm': itc_inv_norm,
                 })
@@ -2491,6 +2584,21 @@ class GSTReconciliationApp(ctk.CTk):
                 vendor_gstn_col = col
             elif 'vendor inv' in cl or 'external doc' in cl:
                 vendor_inv_col = col
+
+        # Pre-build norm_key -> [row_indices] index to avoid O(n) scans on every click
+        from collections import defaultdict
+        _norm_key_index = defaultdict(list)
+        if vendor_gstn_col and vendor_inv_col:
+            for _ri, _row in self.itc_result_df.iterrows():
+                _nk = normalize_gstin(str(_row[vendor_gstn_col])) + '|' + normalize_invoice(str(_row[vendor_inv_col]))
+                _norm_key_index[_nk].append(_ri)
+
+        # Pre-build 2A results index: norm_key -> [row_indices in gstr_2a_results_df]
+        _2a_result_index = defaultdict(list)
+        if self.gstr_2a_results_df is not None and not self.gstr_2a_results_df.empty:
+            for _ri, _row in self.gstr_2a_results_df.iterrows():
+                _nk = normalize_gstin(str(_row.get('GSTN', ''))) + '|' + normalize_invoice(str(_row.get('Document_number', '')))
+                _2a_result_index[_nk].append(_ri)
 
         # Header
         header = ctk.CTkFrame(debug_win, fg_color="#FFF3E0")
@@ -2571,22 +2679,21 @@ class GSTReconciliationApp(ctk.CTk):
         counter_lbl.pack(pady=5)
 
         def _save_remarks(p, action):
-            """Save the remarks text to all sibling ITC rows for this invoice."""
+            """Append debug remark to any existing auto-remark for all sibling ITC rows."""
             remark_text = remarks_entry.get().strip()
             if not remark_text:
                 return
-            # Prepend action to remark
-            full_remark = f"[{action}] {remark_text}"
+            new_part = f"[{action}] {remark_text}"
             norm_key = normalize_gstin(p['itc_gstin']) + '|' + p['itc_inv_norm']
             if 'Remarks' not in self.itc_result_df.columns:
                 self.itc_result_df['Remarks'] = ''
             if vendor_gstn_col and vendor_inv_col:
-                for row_idx, row in self.itc_result_df.iterrows():
-                    row_key = normalize_gstin(str(row[vendor_gstn_col])) + '|' + normalize_invoice(str(row[vendor_inv_col]))
-                    if row_key == norm_key:
-                        self.itc_result_df.at[row_idx, 'Remarks'] = full_remark
+                for row_idx in _norm_key_index.get(norm_key, []):
+                    existing = str(self.itc_result_df.at[row_idx, 'Remarks']).strip()
+                    self.itc_result_df.at[row_idx, 'Remarks'] = (existing + '; ' + new_part) if existing else new_part
             else:
-                self.itc_result_df.at[p['itc_index'], 'Remarks'] = full_remark
+                existing = str(self.itc_result_df.at[p['itc_index'], 'Remarks']).strip()
+                self.itc_result_df.at[p['itc_index'], 'Remarks'] = (existing + '; ' + new_part) if existing else new_part
 
         def display_pair(i):
             if i >= state['total']:
@@ -2626,32 +2733,50 @@ class GSTReconciliationApp(ctk.CTk):
 
         def on_match():
             p = candidates[state['idx']]
-            # Save previous statuses for undo
             norm_key = normalize_gstin(p['itc_gstin']) + '|' + p['itc_inv_norm']
-            prev_statuses = {}
-            prev_remarks = {}
-            if vendor_gstn_col and vendor_inv_col:
-                for row_idx, row in self.itc_result_df.iterrows():
-                    row_key = normalize_gstin(str(row[vendor_gstn_col])) + '|' + normalize_invoice(str(row[vendor_inv_col]))
-                    if row_key == norm_key:
-                        prev_statuses[row_idx] = self.itc_result_df.at[row_idx, 'Status']
-                        prev_remarks[row_idx] = self.itc_result_df.at[row_idx, 'Remarks'] if 'Remarks' in self.itc_result_df.columns else ''
-            else:
-                prev_statuses[p['itc_index']] = self.itc_result_df.at[p['itc_index'], 'Status']
-                prev_remarks[p['itc_index']] = self.itc_result_df.at[p['itc_index'], 'Remarks'] if 'Remarks' in self.itc_result_df.columns else ''
+            df = self.itc_result_df
+            target_rows = _norm_key_index.get(norm_key, [p['itc_index']]) if vendor_gstn_col and vendor_inv_col else [p['itc_index']]
+            # Columns to save/restore for undo
+            tracked_cols = ['Status', 'Remarks', '2A Invoice No', '2A GSTIN',
+                            'CGST as per 2A', 'SGST as per 2A', 'IGST as per 2A',
+                            'Type', 'Booking Month as per GSTR-2A']
+            prev_vals = {col: {} for col in tracked_cols}
+            for row_idx in target_rows:
+                for col in tracked_cols:
+                    prev_vals[col][row_idx] = df.at[row_idx, col] if col in df.columns else ''
 
-            state['history'].append({'action': 'match', 'idx': state['idx'], 'prev_statuses': prev_statuses, 'prev_remarks': prev_remarks})
+            # Save previous 2A result statuses for undo
+            twoa_norm_key = normalize_gstin(p['twoa_gstin']) + '|' + normalize_invoice(p['twoa_invoice'])
+            prev_2a_statuses = {}
+            if self.gstr_2a_results_df is not None and 'Status' in self.gstr_2a_results_df.columns:
+                for _ri in _2a_result_index.get(twoa_norm_key, []):
+                    prev_2a_statuses[_ri] = self.gstr_2a_results_df.at[_ri, 'Status']
 
-            # Save remarks before moving on
+            state['history'].append({'action': 'match', 'idx': state['idx'], 'prev_vals': prev_vals, 'prev_2a_statuses': prev_2a_statuses})
+
             _save_remarks(p, 'Matched')
-            # Update this row and all sibling rows with same GSTIN+Invoice
-            if vendor_gstn_col and vendor_inv_col:
-                for row_idx, row in self.itc_result_df.iterrows():
-                    row_key = normalize_gstin(str(row[vendor_gstn_col])) + '|' + normalize_invoice(str(row[vendor_inv_col]))
-                    if row_key == norm_key:
-                        self.itc_result_df.at[row_idx, 'Status'] = 'Matched but invoice number is not accurate'
-            else:
-                self.itc_result_df.at[p['itc_index'], 'Status'] = 'Matched but invoice number is not accurate'
+            # Ensure all 2A columns exist
+            defaults = {'2A Invoice No': 'Not Found', '2A GSTIN': 'Not Found',
+                        'CGST as per 2A': 'Not found in 2A', 'SGST as per 2A': 'Not found in 2A',
+                        'IGST as per 2A': 'Not found in 2A', 'Type': 'Not found in 2A',
+                        'Booking Month as per GSTR-2A': 'Not found in 2A'}
+            for col, default in defaults.items():
+                if col not in df.columns:
+                    df[col] = default
+            for row_idx in target_rows:
+                df.at[row_idx, 'Status'] = 'Matched but invoice number is not accurate'
+                df.at[row_idx, '2A Invoice No'] = p['twoa_invoice']
+                df.at[row_idx, '2A GSTIN'] = p['twoa_gstin']
+                df.at[row_idx, 'CGST as per 2A'] = p['twoa_cgst']
+                df.at[row_idx, 'SGST as per 2A'] = p['twoa_sgst']
+                df.at[row_idx, 'IGST as per 2A'] = p['twoa_igst']
+                df.at[row_idx, 'Type'] = p.get('twoa_type', '')
+                df.at[row_idx, 'Booking Month as per GSTR-2A'] = p.get('twoa_booking_month', '')
+
+            # Update matching 2A result rows to 'Matched'
+            if self.gstr_2a_results_df is not None and 'Status' in self.gstr_2a_results_df.columns:
+                for _ri in _2a_result_index.get(twoa_norm_key, []):
+                    self.gstr_2a_results_df.at[_ri, 'Status'] = 'Matched'
 
             state['matched'] += 1
             state['idx'] += 1
@@ -2663,13 +2788,12 @@ class GSTReconciliationApp(ctk.CTk):
             # Save previous remarks for undo
             norm_key = normalize_gstin(p['itc_gstin']) + '|' + p['itc_inv_norm']
             prev_remarks = {}
+            has_remarks = 'Remarks' in self.itc_result_df.columns
             if vendor_gstn_col and vendor_inv_col:
-                for row_idx, row in self.itc_result_df.iterrows():
-                    row_key = normalize_gstin(str(row[vendor_gstn_col])) + '|' + normalize_invoice(str(row[vendor_inv_col]))
-                    if row_key == norm_key:
-                        prev_remarks[row_idx] = self.itc_result_df.at[row_idx, 'Remarks'] if 'Remarks' in self.itc_result_df.columns else ''
+                for row_idx in _norm_key_index.get(norm_key, []):
+                    prev_remarks[row_idx] = self.itc_result_df.at[row_idx, 'Remarks'] if has_remarks else ''
             else:
-                prev_remarks[p['itc_index']] = self.itc_result_df.at[p['itc_index'], 'Remarks'] if 'Remarks' in self.itc_result_df.columns else ''
+                prev_remarks[p['itc_index']] = self.itc_result_df.at[p['itc_index'], 'Remarks'] if has_remarks else ''
 
             state['history'].append({'action': 'skip', 'idx': state['idx'], 'prev_remarks': prev_remarks})
 
@@ -2683,18 +2807,33 @@ class GSTReconciliationApp(ctk.CTk):
             if not state['history']:
                 return
             entry = state['history'].pop()
-            # Revert counters
+            df = self.itc_result_df
             if entry['action'] == 'match':
                 state['matched'] -= 1
-                # Restore original statuses
-                for row_idx, old_status in entry['prev_statuses'].items():
-                    self.itc_result_df.at[row_idx, 'Status'] = old_status
+                if 'prev_vals' in entry:
+                    for col, row_map in entry['prev_vals'].items():
+                        if col in df.columns:
+                            for row_idx, old_val in row_map.items():
+                                df.at[row_idx, col] = old_val
+                else:
+                    # legacy undo entries
+                    for row_idx, old_status in entry.get('prev_statuses', {}).items():
+                        df.at[row_idx, 'Status'] = old_status
+                    if '2A Invoice No' in df.columns:
+                        for row_idx, old_inv in entry.get('prev_2a_invoices', {}).items():
+                            df.at[row_idx, '2A Invoice No'] = old_inv
+                    if 'Remarks' in df.columns:
+                        for row_idx, old_remark in entry.get('prev_remarks', {}).items():
+                            df.at[row_idx, 'Remarks'] = old_remark
+                # Revert 2A result statuses
+                if self.gstr_2a_results_df is not None and 'Status' in self.gstr_2a_results_df.columns:
+                    for _ri, old_status in entry.get('prev_2a_statuses', {}).items():
+                        self.gstr_2a_results_df.at[_ri, 'Status'] = old_status
             elif entry['action'] == 'skip':
                 state['skipped'] -= 1
-            # Restore original remarks
-            if 'prev_remarks' in entry and 'Remarks' in self.itc_result_df.columns:
-                for row_idx, old_remark in entry['prev_remarks'].items():
-                    self.itc_result_df.at[row_idx, 'Remarks'] = old_remark
+                if 'Remarks' in df.columns:
+                    for row_idx, old_remark in entry.get('prev_remarks', {}).items():
+                        df.at[row_idx, 'Remarks'] = old_remark
             # Go back to that pair
             state['idx'] = entry['idx']
             self.log(f"Debug Back: Reverted pair {entry['idx'] + 1} ({entry['action']})")
