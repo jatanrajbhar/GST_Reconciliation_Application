@@ -1,222 +1,186 @@
-# GST Reconciliation Tool
+﻿# GST Reconciliation Tool
 
-A portable desktop application for automated GST (Goods and Services Tax) reconciliation and data processing. This tool helps businesses efficiently match, validate, and reconcile GST transactions across multiple document types.
+> Copyright (c) 2024-2025 Jatan Rajbhar. All rights reserved. — [LICENSE](LICENSE.md) | [NOTICE](NOTICE.md)
+
+
+A Windows desktop application for Indian businesses to reconcile GSTR-2B supplier data against their ITC (Input Tax Credit) purchase register — built with Python and CustomTkinter.
+
+**Developed by [GSC in time](mailto:info@gscintime.com)**
+
+---
+
+## What It Does
+
+Every month, GST-registered businesses must compare invoices uploaded by their suppliers on the GST portal (GSTR-2B) against their own purchase records (ITC register). Mismatches mean ITC claims may be disallowed by the government. This tool automates that reconciliation, flags differences, and produces a colour-coded Excel report.
+
+---
 
 ## Features
 
-- **Multi-Format Support**: Process ITC (Input Tax Credit), B2B, B2BA, CDNR, CDNRA, IMPG, and IMPGSEZ transactions
-- **Duplicate Merging**: Automatically merge duplicate vendor invoices and consolidate tax amounts
-- **Intelligent Matching**: Fuzzy matching logic for invoices and GSTIN numbers to handle minor discrepancies
-- **Amendment Processing**: Match and update original transactions with amendment documents
-- **Data Validation**: Comprehensive error checking and data quality validation
-- **Excel & CSV Support**: Import data from both Excel (multiple sheets) and CSV files
-- **Template Generation**: Download pre-formatted templates for data entry
-- **Detailed Logging**: Real-time processing logs with step-by-step reconciliation details
-- **Precision Rounding**: ROUND_HALF_UP rounding for accurate rupee calculations
-- **User-Friendly GUI**: Modern, intuitive graphical interface built with CustomTkinter
+| Feature | Description |
+| --- | --- |
+| **GSTR-2B vs ITC Reconciliation** | Matches B2B, B2BA, CDNR, CDNRA, IMPG, IMPGSEZ against your ITC register |
+| **Smart Invoice Matching** | Exact match → amount-based fuzzy match → string-similarity fallback |
+| **Suffix / Prefix Guard** | Prevents false cross-vendor matches while allowing valid cross-fiscal-year matches |
+| **Status Classification** | Matched / Higher in 2A / Lower in 2A / Not found in 2A per invoice |
+| **2B Results Sheet** | Every 2B row gets a status: Matched, Unmatched, or Not Found in ITC |
+| **Debug Matching** | Review borderline pairs one-by-one; accept or skip with remarks |
+| **YTD Database** | SQLite-backed year-to-date store; browse by period, mark matched/unmatched |
+| **Match with Past 2A DB** | Reconcile current ITC against previously unmatched 2B rows from database |
+| **Excel Export** | Colour-coded ITC Results + 2B Results in a single workbook |
+| **Download Template** | Pre-formatted Excel template with all required sheets |
+| **Upload Excel (All Sheets)** | Load all sheets from a single workbook in one click |
+| **GST Portal Status** | Optional: automated portal check via Selenium |
 
-## System Requirements
-
-- **Python**: 3.8 or higher
-- **OS**: Windows, macOS, or Linux
-- **Memory**: Minimum 2GB RAM
-- **Storage**: 100MB for application and dependencies
+---
 
 ## Installation
 
 ### Prerequisites
 
-- Python 3.8+ installed on your system
+- Python 3.9 or higher
+- pip
 
-### Setup Instructions
+### Install dependencies
 
-1. **Clone or Extract the Repository**
-   ```bash
-   cd "GST Reconciliation tool"
-   ```
+```bash
+pip install -r requirements_desktop.txt
+```
 
-2. **Create a Virtual Environment** (Recommended)
-   ```bash
-   python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   ```
-
-3. **Install Dependencies**
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-   Or manually install:
-   ```bash
-   pip install pandas numpy openpyxl pillow customtkinter
-   ```
-
-## Usage
-
-### Running the Application
+### Run
 
 ```bash
 python gst_reconciliation_app.py
 ```
 
-The application will open with an intuitive graphical interface for managing your GST reconciliation workflow.
-
-### Basic Workflow
-
-1. **Load Data Files**
-   - Click "Browse" to select your input Excel or CSV files
-   - The tool automatically detects and processes columns containing GSTIN, Invoice No, and tax amounts (CGST, SGST, IGST)
-
-2. **Select Transaction Types**
-   - Choose which GST document types to process:
-     - **ITC**: Input Tax Credit invoices
-     - **B2B**: Business-to-Business supplies
-     - **B2BA**: B2B amendments
-     - **CDNR**: Credit/Debit Notes - Registered
-     - **CDNRA**: Credit/Debit Notes amendments
-     - **IMPG**: Import of Goods
-     - **IMPGSEZ**: Import of Goods - SEZ
-
-3. **Configure Options**
-   - Set filtering criteria if needed
-   - Enable/disable specific reconciliation steps
-
-4. **Execute Reconciliation**
-   - Click the "Process" or "Reconcile" button
-   - Monitor progress in the real-time logging window
-   - Review results and generated reports
-
-5. **Export Results**
-   - Save reconciled data as Excel files
-   - Export detailed reports for audit trails
-
-### File Format Requirements
-
-#### Excel Files
-
-- Each sheet should represent a different transaction type or document class
-- Required columns vary by document type but typically include:
-  - Invoice Number / BOE No
-  - GSTIN (Goods and Services Tax Identification Number)
-  - CGST Amount (Central GST)
-  - SGST Amount (State GST)
-  - IGST Amount (Integrated GST)
-
-#### CSV Files
-
-- Standard comma-separated values format
-- First row should contain column headers
-- Same column naming conventions as Excel files
-
-### Downloading Templates
-
-Use the "Download Template" option to get pre-formatted Excel files with:
-- Correct column structure
-- Sample data
-- Multiple sheets for different document types
-- Ready-to-use layout for your data
-
-## Supported GST Transaction Types
-
-| Type | Full Name | Description |
-|------|-----------|-------------|
-| **ITC** | Input Tax Credit | Tax credit from inbound supplies |
-| **B2B** | Business-to-Business | Supplies from one registered business to another |
-| **B2BA** | B2B Amendment | Corrections to B2B invoices |
-| **CDNR** | Credit/Debit Notes - Registered | Adjustments for registered suppliers |
-| **CDNRA** | CDNR Amendment | Corrections to credit/debit notes |
-| **IMPG** | Import of Goods | Foreign purchases with integrated GST |
-| **IMPGSEZ** | Import of Goods - SEZ | Special Economic Zone imports |
-
-## Advanced Features
-
-### Fuzzy Matching
-
-- Handles minor formatting variations in invoice numbers
-- Matches GST numbers with leading/trailing whitespace differences
-- Strips non-alphanumeric characters for better matching accuracy
-
-### Duplicate Handling
-
-- Automatically consolidates multiple entries for the same invoice
-- Sums tax amounts (CGST, SGST, IGST) for duplicates
-- Preserves first occurrence of other data fields
-
-### Data Normalization
-
-- Converts scientific notation in invoice numbers to standard format
-- Standardizes GSTIN format (15-character alphanumeric)
-- Handles various numeric formats and currency symbols
-
-### Amendment Reconciliation
-
-- Matches original invoices with amendment/correction documents
-- Updates original records with amendment data
-- Tracks matched and unmatched amendments
-
-## Troubleshooting
-
-### Common Issues
-
-**Issue**: Application won't start
-- **Solution**: Ensure Python 3.8+ is installed and all dependencies are installed via pip
-
-**Issue**: Files not detected
-- **Solution**: Verify file format (Excel .xlsx or CSV .csv), ensure headers are in the first row
-
-**Issue**: Column not recognized
-- **Solution**: Check that column names contain the expected keywords (GSTIN, CGST, SGST, IGST, Invoice, BOE)
-
-**Issue**: Rounding discrepancies
-- **Solution**: The tool uses ROUND_HALF_UP method for accuracy; minor rounding variations may occur with certain decimal values
-
-## Data Privacy & Security
-
-- No data is sent to external servers
-- All processing occurs locally on your machine
-- Files are not automatically saved; you control all output
-- Compatible with standard Windows, macOS, and Linux file systems
-
-## Performance Notes
-
-- Handles datasets up to 100,000+ rows efficiently
-- Processing speed depends on file size and system capabilities
-- For very large files (>500,000 rows), consider splitting into batches
-
-## Technical Stack
-
-- **GUI Framework**: CustomTkinter (modern tkinter wrapper)
-- **Data Processing**: Pandas, NumPy
-- **File Handling**: openpyxl (Excel), CSV module
-- **Image Processing**: Pillow
-- **Precision Math**: Python Decimal module
-
-## License & Attribution
-
-This tool is provided as-is for GST reconciliation purposes. Ensure compliance with Indian GST regulations and your organization's data policies.
-
-## Support & Feedback
-
-For issues, feature requests, or improvements, please:
-1. Review the error logs displayed in the application
-2. Check that your input files follow the recommended format
-3. Verify all required columns are present and properly named
-
-## Version History
-
-- **v1.0**: Initial release with core reconciliation features
-  - Support for multiple GST document types
-  - ITC duplicate merging
-  - Amendment matching and updating
-  - Excel and CSV support
-  - User-friendly GUI interface
+> **Windows executable**: A pre-built `.exe` installer is available for clients — contact [info@gscintime.com](mailto:info@gscintime.com).
 
 ---
 
-## Important Note
+## Quick Start
 
-There might be some faulty values in CGST, SGST, IGST as per 2A column but the matching is 99% accurate.
+### Step 1 — Download the template
 
-**Last Updated**: February 2026
+Click **Download Template** (top-right of dashboard) to get the Excel workbook with all required sheets pre-formatted.
 
-For more information on GST regulations and requirements, visit the [GST Council Official Website](https://gst.gov.in)
+### Step 2 — Fill in your data
+
+| Sheet | Content |
+| --- | --- |
+| `2B-B2B` | Invoice-wise B2B supplies from GSTR-2B |
+| `2B-B2BA` | Amendments to B2B |
+| `2B-CDNR` | Credit / Debit Notes Received |
+| `2B-CDNRA` | Amendments to CDNR |
+| `2B-IMPG` | Import of Goods |
+| `2B-IMPGSEZ` | Import of Goods from SEZ |
+| `Register-ITC` | Your company's ITC purchase register *(mandatory)* |
+
+### Step 3 — Upload
+
+- **All at once**: click **Upload Excel (All Sheets)** and select your filled workbook.
+- **Sheet by sheet**: use the Browse button on each row (CSV or xlsx).
+
+### Step 4 — Reconcile
+
+Click **Process and Reconcile**. Progress is shown in the log panel.
+
+### Step 5 — Review and download results
+
+- **View Results** — interactive table with colour-coded status rows.
+- **Download ITC Results** — Excel with ITC Results + 2B Results sheets.
+- **Download 2A Results** — standalone 2B results sheet.
+
+### Step 6 — Debug borderline matches *(optional)*
+
+Click **Debug Matching** to review pairs where GSTIN and amounts agree but invoice numbers only partially match. Accept or skip each pair, then click **Save to YTD**.
+
+### Step 7 — YTD Database *(optional)*
+
+- **Save to YTD Database** — stores ITC and 2B rows with status in a local SQLite database.
+- **YTD Database** (sidebar) — browse saved data by database → year → month.
+- **Match with Past 2A DB** — match current ITC register against unmatched 2B rows from previous months.
+
+---
+
+## Reconciliation Status Values
+
+| Status | Meaning |
+| --- | --- |
+| **Matched** | Invoice found in 2B; tax amounts agree |
+| **Higher in 2A** | 2B tax amount is higher than ITC register |
+| **Lower in 2A** | 2B tax amount is lower than ITC register |
+| **Not found in 2A** | No matching 2B invoice found for this ITC row |
+| **Unmatched** | Key matched but amounts differ beyond tolerance |
+| **Matched but invoice number is not accurate** | Manually matched via Debug Matching |
+
+---
+
+## Output Columns — ITC Results Sheet
+
+| Column | Description |
+| --- | --- |
+| Status | Reconciliation result (see above) |
+| CGST / SGST / IGST as per 2A | Tax amounts from the matched 2B row |
+| Type | Source table: B2B, CDNR, IMPG, B2BA … or *ytd database* |
+| Booking Month as per GSTR-2A | Tax period from the 2B file |
+| Booking Month as per ITC | Tax period from the ITC register |
+| 2A Invoice No | Invoice number of the matched 2B row |
+| 2A GSTIN | GSTIN of the matched 2B supplier |
+| Remarks | Auto-generated notes (many-to-one, YTD match, debug action) |
+
+---
+
+## File Column Requirements
+
+Column names are matched **case-insensitively** and flexibly — the tool finds columns by keyword, not exact name.
+
+**B2B / B2BA / CDNR / CDNRA**
+- Invoice No / Note No — GSTN / GSTIN — CGST — SGST — IGST — Taxable Value
+
+**IMPG / IMPGSEZ**
+- BOE No / Invoice No — GSTN / GSTIN *(optional)* — IGST — Taxable Value
+
+**ITC Register**
+- Vendor's GSTN / Vendor GSTIN
+- Vendor Inv. No / External Doc No
+- CGST — SGST — IGST — Taxable Value
+
+---
+
+## Tech Stack
+
+| Component | Library |
+| --- | --- |
+| UI Framework | [CustomTkinter](https://github.com/TomSchimansky/CustomTkinter) |
+| Data Processing | Pandas, NumPy |
+| Excel I/O | OpenPyXL |
+| Database | SQLite (`sqlite3` stdlib) |
+| Portal Automation | Selenium *(optional)* |
+| Build | PyInstaller + Inno Setup |
+
+---
+
+## Building the Executable
+
+```bash
+# Install build dependencies
+pip install -r requirements_desktop.txt
+
+# Build the .exe
+python build.py
+```
+
+The spec files `GST_Reconciliation_Tool.spec` / `gst_reconciliation.spec` are used by PyInstaller. The Inno Setup script `installer.iss` packages the output into a Windows installer.
+
+See [BUILD_README.md](BUILD_README.md) for detailed build instructions.
+
+---
+
+## Support & Licensing
+
+This is a **commercial product**. License keys are required for production use.
+
+**GSC in time**
+- Email: [info@gscintime.com](mailto:info@gscintime.com)
+- Phone: +91-22-4612 5600
+

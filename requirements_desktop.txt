@@ -1,0 +1,24 @@
+# Requirements for GST Reconciliation Tool - Desktop Application
+# Install with: pip install -r requirements_desktop.txt
+
+# GUI Framework
+customtkinter>=5.2.0
+
+# Data Processing
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Excel File Handling
+openpyxl>=3.1.0
+
+# Image Processing (for icon conversion)
+Pillow>=10.0.0
+
+# License system
+cryptography>=41.0.0
+
+# Build Tools
+pyinstaller>=6.0.0
+
+# Optional: For converting DOCX to TXT
+python-docx>=1.0.0
